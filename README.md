@@ -9,3 +9,7 @@ methods. Then, we analyze the variables histogram and scatterplot to determine w
 they need transformation. Lastly, we build the smoothing model. 
  
 The prediction error will be evaluted using RMLSE (Root Mean Squared Logarithmic Error). 
+
+# Data  
+
+Data set can be found in the Data file, which is available in 2 formats - RData and CSV
