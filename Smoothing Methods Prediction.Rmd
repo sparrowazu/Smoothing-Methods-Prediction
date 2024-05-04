@@ -1,0 +1,292 @@
+---
+title: "Smoothing Model Building"
+author: "Maya Le"
+output: 
+    pdf_document
+---
+
+```{r,include=FALSE}
+library(ggplot2)
+library(locfit)
+library(class)
+library(lubridate)
+library(dplyr)
+library(mgcv)
+```
+
+# Summary 
+ 
+The model produces a smoothing model that predict property prices based on a set 
+of training data. First, we prepare the data by filling NA values by simple imputation 
+methods. Then, we analyze the variables histogram and scatterplot to determine whether 
+they need transformation. Lastly, we build the smoothing model. 
+ 
+The prediction error will be evaluted using RMLSE (Root Mean Squared Logarithmic Error). 
+
+
+## Preprocessing 
+
+There are a few observations with no rooms. This can be a sign that this data point 
+was recorded incorrectly. We will drop outliers from the training data set, 
+which are the observations with no rooms, bedrooms, or kitchens.
+
+### Transformation (if any, delete if none)
+* price: log-transformed.
+
+### New Variables (if any, delete if none)
+<!-- List all variables/predictors added to dtrain and dtest  -->
+* sinceRmdl: how many years since the property was remodelled.
+* invest: indicates whether the property was bought before it was built. 
+
+
+### Missing data handling
+
+* yr_rmdl: replace the missing values in yr_rmdl with median.
+
+## Model Building
+
+Main package used: `magicSpline`
+
+Forward selection and adding terms using thin plate spline.
+
+## Final Model
+<!-- formula in your final fitted function  -->
+* The final model is $log(price) \sim$ bathrm + ac +bedrm + invest + 
+               s(sinceRmdl) + s(saledate) + style + grade + 
+               cndtn + intwall + s(rooms) + fireplaces  + 
+               s(latitude) + s(longitude) + nbhd + quadrant +  
+               te(gba,landarea) + te(saledate,fireplaces) + te(longitude,gba) +
+               te(gba,latitude) + 
+               te(longitude,eyb) + te(saledate,gba) + te(saledate,eyb,ayb) + 
+               te(gba,latitude,landarea) + 
+               te(bathrm,gba,eyb) + te(gba,landarea,ayb)
+               
+<!-- Details -->
+<!-- R code starts, please present both code and output. -->
+<!-- Provide descriptions and explanations to justify your operations -->
+<!-- Be brief and to the point. -->
+<!-- Only details lead to your final model are needed. If you tried other appoaches/models, you can mention them, no details needed for abandoned attempts. -->
+
+
+
+# 1.Preprocessing
+
+## 1.1 Loading data
+```{r,echo=TRUE}
+setwd("C:/Users/maian/OneDrive - University of Waterloo/Documents/UW/W24/Stat444/Project Smooth")
+load("smooth.Rdata")
+```
+
+## 1.2 Missing data handling
+First, checking for outliers, we see that there are properties with zero rooms, 
+bathrooms, or kitchens. This could indicate errors when the data is recorded. Therefore, 
+we will remove these observations. 
+
+```{r}
+dtrain <- subset(dtrain, rooms != 0 & bedrm != 0 & kitchens != 0 & bathrm != 0)
+```
+
+Next, we see that there are some missing values: 
+```{r}
+colSums(is.na(dtrain))
+``` 
+As for saledate, we will take the year only and calculate the age of the property
+when it was sold. 
+
+```{r}
+dtrain$saledate <- year(dtrain$saledate)
+```
+
+ 
+Ayb is the year that the property was first built. To fill this value, we will 
+use the average age of the other properties, then deduct the age from saledate. 
+
+```{r}
+avgAge <- mean(dtrain$saledate - dtrain$ayb, na.rm = TRUE)
+dtrain$ayb <- ifelse(is.na(dtrain$ayb), dtrain$saledate - avgAge, dtrain$ayb)
+```
+ 
+yr_rmdl is the year that the propety was remodelled. If the value is NA, then we 
+can assume that the property has never been remodelled, and we can use ayb value instead. 
+ 
+```{r}
+dtrain$yr_rmdl <- ifelse(is.na(dtrain$yr_rmdl), dtrain$ayb, dtrain$yr_rmdl)
+```
+ 
+The number of stories that were missing can potentially be extracted from style. 
+ 
+```{r}
+extract_stories <- function(style) {
+  if (grepl("Story", style)) {
+    # If the style contains "story", extract the numeric part
+    as.numeric(strsplit(style, " ")[[1]][1])
+  } else if (grepl("Bi-level", style)) {
+    2
+  } else if (grepl("Split", style)) {
+    1.5
+  } else {
+    1
+  }
+}
+
+dtrain$stories <- ifelse(is.na(dtrain$stories),
+                         sapply(dtrain$style, extract_stories),dtrain$stories)
+``` 
+ 
+Based on this plot, we can see the missing quadrant values, where the properties 
+with quadrant values of NA is presented as black dots: 
+ 
+```{r}
+ggplot(data = dtrain, aes(x = longitude, y = latitude)) +
+  labs(title = "Data Points Segmented by Quadrant", x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  geom_point(data = subset(dtrain, quadrant == "NE"), aes(color = "NE"), size = 2) +
+  geom_point(data = subset(dtrain, quadrant == "NW"), aes(color = "NW"), size = 2) +
+  geom_point(data = subset(dtrain, quadrant == "SE"), aes(color = "SE"), size = 2) +
+  geom_point(data = subset(dtrain, quadrant == "SW"), aes(color = "SW"), size = 2) +
+  geom_point(data = subset(dtrain, is.na(quadrant)), aes(color = "Na"), size = 2)+
+  scale_color_manual(name = "Quadrant", 
+                     values = c(NE = "blue", NW = "green", SE = "red", SW = "orange",
+                                Na = "black"))
+```
+
+Therefore, we can use k-nearest-neighbor method to fill out missing quadrant values 
+using their coordinates. 
+
+```{r}
+fill_quadrant_knn <- function(data, k) {
+  complete_data <- data[!is.na(data$quadrant), c("latitude", "longitude")]
+  complete_labels <- data$quadrant[!is.na(data$quadrant)]  
+  missing_data <- data[is.na(data$quadrant), c("latitude", "longitude")]
+  
+  knn_result <- knn(train = complete_data, test = missing_data, 
+                    cl = complete_labels, k = k)
+  
+  data$quadrant[is.na(data$quadrant)] <- knn_result
+  return(data)
+}
+
+dtrain <- fill_quadrant_knn(dtrain, 5)
+
+labels <- c("NE","NW","SE")
+for (i in seq(1,3)){
+  dtrain$quadrant <- ifelse(dtrain$quadrant == i, labels[i],dtrain$quadrant)
+}
+```
+
+As for the testing data set, there are some levels in categorical variables that 
+weren't in the original training data set. To run the evaluation file, we will 
+replace these values using the most common values. 
+
+for (col in names(dtest)[sapply(dtest, is.character)]) {
+  new_levels <- setdiff(unique(dtest[[col]]), unique(dtrain[[col]]))
+  if (length(new_levels) > 0) {
+    most_common_level <- names(sort(table(dtrain[[col]]), decreasing = TRUE))[1]
+    dtest[[col]][dtest[[col]] %in% new_levels] <- most_common_level
+  }
+}
+ 
+# 2. Model building 
+
+First, we need to transform the variables. 
+
+```{r}
+hist(dtrain$price, main = "Histogram of Price", xlab = "Price")
+```
+ 
+The histogram is right skewed. Therefore, we will apply log transform to get a 
+normal distributed histogram. 
+
+```{r}
+hist(log(dtrain$price), main = "Log of price", xlab = "log(price)")
+```
+ 
+We will treat a half bathroom as 0.5 bathroom, and combine the two variables. 
+
+
+```{r,echo=TRUE}
+dtrain$bathrm <- dtrain$bathrm + (dtrain$hf_bathrm * 0.5)
+```
+
+We will create a new variable that shows how long the property was remodeled. 
+```{r}
+dtrain$sinceRmdl <- ifelse(is.na(dtrain$yr_rmdl)|dtrain$yr_rmdl > dtrain$saledate, 
+                           dtrain$saledate - dtrain$ayb, 
+                           dtrain$saledate - dtrain$yr_rmdl)
+```
+ 
+Also, notice that there are some property that was bought before it was built. 
+That is, ayb is larger than saledate. 
+
+```{r}
+sum(dtrain$ayb > dtrain$saledate)
+```
+
+Therefore, we will create a variable called invest, that indicates "Y" if the 
+property was bought before it was built. 
+
+```{r}
+dtrain$invest <- ifelse(dtrain$ayb > dtrain$saledate, "Y", "N")
+```
+
+Next, we will choose a model by AIC in a Stepwise Algorithm. Starting with the 
+basic model log(price) ~ 1.
+
+```{r}
+para <- c(
+  "bathrm",  "ac", "rooms", "bedrm", "ayb", "eyb",
+  "stories", "saledate", "price", "gba", "kitchens", "fireplaces", "landarea",
+  "latitude", "longitude", "quadrant","sinceRmdl", "invest")
+
+match_index <- match(para, names(dtrain))
+train <- dtrain[,match_index]
+
+basic <- lm(log(price) ~ 1, data=train)  
+full <- lm(log(price) ~ (.)^2, data=train)
+
+mod <- step(basic,scope=list(lower=basic, upper=full),
+                                direction="forward", trace=0)
+summary(mod)
+``` 
+
+Based on this result, we can also see the interaction terms. After performing 
+forward selection and adding terms using thin plate spline, we arrive at our 
+final model:
+
+```{r}
+fit <- bam(log(price) ~ bathrm + ac +bedrm + invest + 
+             s(sinceRmdl) +  s(saledate) + style + grade + 
+             cndtn + intwall + s(rooms) + fireplaces  + 
+             s(latitude) + s(longitude) + nbhd + quadrant + 
+             te(gba,landarea) + te(saledate,fireplaces) + te(longitude,gba) +
+             te(gba,latitude) + 
+             te(longitude,eyb) + te(saledate,gba) + te(saledate,eyb,ayb) + 
+             te(gba,latitude,landarea) + 
+             te(bathrm,gba,eyb) + te(gba,landarea,ayb), 
+           data=dtrain)
+
+summary(fit)
+
+AIC(fit)
+
+BIC(fit)
+```
+ 
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
